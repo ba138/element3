@@ -52,6 +52,73 @@ flutter run
 Requires a recent Flutter (3.44+) and, for iOS, current Xcode/iOS SDK to meet
 App Store requirements.
 
+## How it works
+
+### High-level flow
+
+```
+┌──────────────┐   scan/connect    ┌──────────────┐   BLE notify     ┌──────────┐
+│  ScanScreen  │ ────────────────▶ │  BleService  │ ◀─────────────── │  JK BMS  │
+└──────────────┘                   └──────┬───────┘   (raw frames)    └──────────┘
+       │ tap device                       │ parse
+       ▼                                  ▼
+┌──────────────┐   watch streams   ┌──────────────────┐
+│DashboardScreen│ ◀──────────────── │ JkBmsProtocol    │
+└──────────────┘   (Riverpod)      │ → BatteryStatus  │
+                                   └──────────────────┘
+```
+
+1. **Permissions & adapter check.** On launch `ScanScreen` requests the platform
+   Bluetooth permissions (`BlePermissions`) and calls
+   `BleService.ensureBluetoothOn()`, which waits for / prompts to enable the
+   adapter so we never call `startScan` while Bluetooth is off.
+2. **Scan.** `BleService.scanForBatteries()` starts a filtered scan for the JK
+   BMS Nordic-UART service UUID and streams `ScanResult`s to the list.
+3. **Connect & subscribe.** Tapping a device calls `BleService.connect()`, which
+   connects, discovers services, enables notifications on the BMS notify
+   characteristic, and writes the "read-all" command to start the data stream.
+4. **Parse.** Incoming BLE chunks are reassembled into frames and decoded by
+   `JkBmsProtocol.parseFrame()` into an immutable `BatteryStatus`.
+5. **Display.** `BatteryStatus` snapshots flow through Riverpod
+   (`batteryStatusProvider`) to `DashboardScreen`, which renders the metrics live.
+
+### State management
+
+[Riverpod](https://riverpod.dev) wires everything together (`lib/state/providers.dart`):
+
+| Provider | Type | Purpose |
+| --- | --- | --- |
+| `bleServiceProvider` | `Provider<BleService>` | Single BLE service instance (disposed with the app) |
+| `connectionStateProvider` | `StreamProvider<BleConnectionState>` | Drives the connection banner |
+| `batteryStatusProvider` | `StreamProvider<BatteryStatus>` | Drives the live dashboard |
+
+The UI is fully reactive: widgets `watch` these providers and rebuild whenever a
+new frame arrives or the connection state changes.
+
+### Connection reliability
+
+`BleService` is built around the failure modes that matter for BLE:
+
+- **Adapter off:** `ensureBluetoothOn()` gates every scan/connect; on Android it
+  requests the system enable-Bluetooth dialog, on iOS it waits for the user.
+- **Permissions:** runtime requests for Android 12+ `BLUETOOTH_SCAN`/`CONNECT`
+  (and legacy location/Bluetooth for older Android); iOS uses the Info.plist
+  usage strings.
+- **Dropouts & auto-reconnect:** a `connectionState` listener detects unexpected
+  disconnects and schedules reconnection with **exponential backoff** (capped at
+  30s). Calling `disconnect()` marks the disconnect intentional so it does *not*
+  auto-reconnect.
+- **Backgrounding (iOS):** the `bluetooth-central` background mode keeps the link
+  alive when the app is backgrounded.
+
+### Data model
+
+`BatteryStatus` (`lib/models/battery_status.dart`) is an immutable snapshot of one
+frame. It stores the raw values (voltage, current, SoC, capacities, temperatures,
+balancing current, per-cell voltages) and derives convenience values such as
+`power` (V×A), `isCharging`/`isDischarging`, and `cellDeltaMillivolts` (pack
+balance indicator).
+
 ## Wiring up the real BMS protocol
 
 `lib/ble/jk_bms_protocol.dart` is the single place that maps raw BLE bytes to a
