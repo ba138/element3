@@ -30,11 +30,15 @@ class _ScanScreenState extends ConsumerState<ScanScreen> {
       _showSnack('Bluetooth permission is required to find your battery.');
       return;
     }
+    final service = ref.read(bleServiceProvider);
+    if (!await service.ensureBluetoothOn()) {
+      _showSnack('Please turn on Bluetooth to find your battery.');
+      return;
+    }
     setState(() {
       _scanning = true;
       _results = const [];
     });
-    final service = ref.read(bleServiceProvider);
     service.scanForBatteries().listen((results) {
       if (mounted) setState(() => _results = results);
     });

@@ -52,16 +52,60 @@ class BleService {
     if (!_connectionController.isClosed) _connectionController.add(state);
   }
 
+  /// Live Bluetooth adapter state (on/off/unauthorized/...).
+  Stream<BluetoothAdapterState> get adapterState =>
+      FlutterBluePlus.adapterState;
+
+  /// Ensures the Bluetooth adapter is powered on before any scan/connect.
+  ///
+  /// On Android we can ask the OS to turn it on; on iOS that's not permitted,
+  /// so we wait briefly for the user to enable it. Returns true once the
+  /// adapter reports [BluetoothAdapterState.on].
+  Future<bool> ensureBluetoothOn({
+    Duration wait = const Duration(seconds: 10),
+  }) async {
+    if (!await FlutterBluePlus.isSupported) return false;
+
+    if (FlutterBluePlus.adapterStateNow == BluetoothAdapterState.on) {
+      return true;
+    }
+
+    _emit(BleConnectionState.bluetoothOff);
+
+    // Android: prompt the system "turn on Bluetooth" dialog. No-op on iOS.
+    try {
+      await FlutterBluePlus.turnOn();
+    } catch (_) {
+      // turnOn isn't available/allowed (e.g. iOS) — fall through and wait.
+    }
+
+    try {
+      await FlutterBluePlus.adapterState
+          .firstWhere((s) => s == BluetoothAdapterState.on)
+          .timeout(wait);
+      return true;
+    } catch (_) {
+      return FlutterBluePlus.adapterStateNow == BluetoothAdapterState.on;
+    }
+  }
+
   /// Scans for nearby JK BMS devices advertising the NUS service.
+  ///
+  /// Guards on the adapter being on first so we never throw
+  /// `Bluetooth must be turned on`.
   Stream<List<ScanResult>> scanForBatteries({
     Duration timeout = const Duration(seconds: 15),
-  }) {
+  }) async* {
+    if (!await ensureBluetoothOn()) {
+      _emit(BleConnectionState.bluetoothOff);
+      return;
+    }
     _emit(BleConnectionState.scanning);
-    FlutterBluePlus.startScan(
+    await FlutterBluePlus.startScan(
       timeout: timeout,
       withServices: [Guid(JkBmsProtocol.serviceUuid)],
     );
-    return FlutterBluePlus.scanResults;
+    yield* FlutterBluePlus.scanResults;
   }
 
   Future<void> stopScan() async {
